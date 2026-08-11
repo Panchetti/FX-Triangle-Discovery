@@ -1,0 +1,24 @@
+# Core scientific stack (pinned to versions validated in the anaconda base env)
+numpy==1.26.4
+pandas==2.3.1
+scipy==1.12.0
+statsmodels==0.14.0
+matplotlib==3.7.2
+pyarrow==11.0.0
+
+# Data source: Dukascopy historical tick data
+dukascopy-python==4.0.1
+
+# Later weeks (vol proxy / HMM regimes); harmless to install now
+arch>=6.3
+hmmlearn>=0.3
+
+# Week 4: Hayashi-Yoshida hot loop. numba is the middle tier + fallback when the
+# optional C++ extension (cpp/, pybind11) is not built. numba 0.60 supports numpy 1.26.
+numba>=0.59
+
+# Tooling
+PyYAML>=6.0
+tqdm>=4.66
+pytest>=8.0
+ipykernel>=6.29

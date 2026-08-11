@@ -1,0 +1,25 @@
+# Environments / tooling
+.venv/
+__pycache__/
+*.egg-info/
+.ipynb_checkpoints/
+.pytest_cache/
+.idea/
+.Rhistory
+
+# Data (large; reproducible from the resumable puller) — per CLAUDE.md, all of data/
+data/
+
+# Outputs (figures live in the committed notebooks; PNGs are regenerable)
+outputs/
+
+# OS
+.DS_Store
+
+# Compiled C++ extension + build dirs
+build/
+*.so
+
+# Internal planning/blueprint/spec docs — kept locally, not published
+*.md
+!README.md

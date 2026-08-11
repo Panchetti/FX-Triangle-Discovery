@@ -1,0 +1,132 @@
+"""Hayashi-Yoshida lead-lag on raw asynchronous ticks."""
+
+from __future__ import annotations
+
+import datetime as dt
+
+import numpy as np
+import pandas as pd
+
+from ..config import Triangle
+
+# backend: cpp -> numba -> numpy
+try:
+    from fxpd_fast import hy_cov, hy_leadlag  # type: ignore
+
+    BACKEND = "cpp"
+except Exception:  # noqa: BLE001
+    try:
+        from ._hy_numba import hy_cov as _cov, hy_leadlag as _ll
+
+        # warm the JIT so a numba failure falls back cleanly
+        _probe = np.array([0, 1], dtype=np.int64)
+        _cov(_probe, np.array([0.0, 1.0]), _probe, np.array([0.0, 1.0]))
+        _ll(_probe, np.array([0.0, 1.0]), _probe, np.array([0.0, 1.0]),
+            np.array([0], dtype=np.int64))
+        hy_cov, hy_leadlag = _cov, _ll
+        BACKEND = "numba"
+    except Exception:  # noqa: BLE001
+        from ._hy_numpy import hy_cov, hy_leadlag
+
+        BACKEND = "numpy"
+
+NS_PER_MS = 1_000_000
+THETAS_MS = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000]
+
+def theta_grid_ns() -> np.ndarray:
+    """Symmetric lead-lag grid -/+ THETAS_MS plus 0, in int64 nanoseconds."""
+    pos = np.array(THETAS_MS, dtype=np.int64)
+    return np.concatenate([-pos[::-1], [0], pos]).astype(np.int64) * NS_PER_MS
+
+def hy_corr(tx: np.ndarray, x: np.ndarray, ty: np.ndarray, y: np.ndarray) -> float:
+    """HY correlation cov / sqrt(RV_X * RV_Y). May exceed 1 in finite samples."""
+    rvx = float(np.sum(np.diff(x) ** 2))
+    rvy = float(np.sum(np.diff(y) ** 2))
+    return hy_cov(tx, x, ty, y) / np.sqrt(rvx * rvy)
+
+def leadlag_summary(thetas_ns: np.ndarray, rho: np.ndarray) -> dict:
+    """theta* = argmax|rho|, plus the peak rho and the asymmetry statistic S."""
+    thetas_ms = thetas_ns / NS_PER_MS
+    k = int(np.argmax(np.abs(rho)))
+    ar = np.abs(rho)
+    neg, pos = ar[thetas_ns < 0], ar[thetas_ns > 0]
+    S = (neg.max() if neg.size else 0.0) - (pos.max() if pos.size else 0.0)
+    return {"theta_star_ms": float(thetas_ms[k]), "rho_peak": float(rho[k]),
+            "asymmetry_S": float(S)}
+
+def synth_ticks(
+    t1: np.ndarray, p1: np.ndarray, t2: np.ndarray, p2: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Async synthetic-cross ticks: union event times, LOCF sum of the two log mids."""
+    ev = np.union1d(t1, t2)
+    i1 = np.searchsorted(t1, ev, side="right") - 1
+    i2 = np.searchsorted(t2, ev, side="right") - 1
+    ok = (i1 >= 0) & (i2 >= 0)
+    return ev[ok], p1[i1[ok]] + p2[i2[ok]]
+
+def _instr_arrays(instrument: str, date: dt.date, liquid: tuple[int, int]):
+    """Cleaned liquid-hours ticks for one instrument as (ts_ns int64, logmid f64)."""
+    from ..data import store
+    from ..data.clean import clean_ticks
+    from ..data.mids import logmid_series
+
+    df = clean_ticks(store.read_day(instrument, date)).ticks
+    ts = pd.DatetimeIndex(df["ts"])
+    mask = np.asarray((ts.hour >= liquid[0]) & (ts.hour < liquid[1]))
+    df = df[mask]
+    p = logmid_series(df)
+    return p.index.view("i8").astype(np.int64), p.to_numpy(float)
+
+def _series_arrays(triangle: Triangle, which: str, date: dt.date, liquid):
+    """(ts_ns, logmid) for a named series: 'cross' | 'leg1' | 'leg2' | 'synth'."""
+    name = {"cross": triangle.cross, "leg1": triangle.leg1, "leg2": triangle.leg2}
+    if which in name:
+        return _instr_arrays(name[which], date, liquid)
+    if which == "synth":
+        t1, p1 = _instr_arrays(triangle.leg1, date, liquid)
+        t2, p2 = _instr_arrays(triangle.leg2, date, liquid)
+        return synth_ticks(t1, p1, t2, p2)
+    raise ValueError(f"unknown series {which!r}")
+
+def leadlag_windows(
+    triangle: Triangle,
+    dates: list[dt.date],
+    x_series: str,
+    y_series: str,
+    liquid: tuple[int, int] = (7, 17),
+    min_ticks: int = 200,
+) -> pd.DataFrame:
+    """theta* per (day x liquid window) for the pair (x_series leads if theta*<0)."""
+    thetas = theta_grid_ns()
+    rows, curves, skipped = [], [], 0
+    for d in dates:
+        try:
+            tx, x = _series_arrays(triangle, x_series, d, liquid)
+            ty, y = _series_arrays(triangle, y_series, d, liquid)
+        except FileNotFoundError:
+            skipped += 1
+            continue
+        if len(tx) < min_ticks or len(ty) < min_ticks:
+            skipped += 1
+            continue
+        rho = hy_leadlag(tx, x, ty, y, thetas)
+        s = leadlag_summary(thetas, rho)
+        s.update(date=d, n_x=int(len(tx)), n_y=int(len(ty)))
+        rows.append(s)
+        curves.append(rho)
+    out = pd.DataFrame(rows)
+    out.attrs["thetas_ms"] = thetas / NS_PER_MS
+    out.attrs["rho"] = np.array(curves) if curves else np.empty((0, len(thetas)))
+    out.attrs["skipped"] = skipped
+    out.attrs["pair"] = f"{x_series}~{y_series}"
+    return out
+
+def sign_test(theta_star_ms: pd.Series) -> dict:
+    """Binomial sign test for 'theta* < 0 in k of n windows' (H0: p=0.5, two-sided)."""
+    from scipy.stats import binomtest
+
+    t = pd.Series(theta_star_ms).dropna()
+    n = int(len(t))
+    k = int((t < 0).sum())
+    p = float(binomtest(k, n, 0.5).pvalue) if n else np.nan
+    return {"n": n, "k_neg": k, "frac_neg": (k / n if n else np.nan), "binom_p": p}
