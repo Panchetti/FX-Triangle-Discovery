@@ -1,8 +1,10 @@
-"""Hayashi-Yoshida acceptance gate (Week 4): 4 synthetic recipes + parity.
+"""Hayashi-Yoshida acceptance gate (Week 4): 4 synthetic recipes + oracle parity.
 
 The first test DEFINES the sign convention (Y follows X by delta -> peak at -delta).
-numba<->numpy parity runs always; C++ parity is importorskip'd so CI is green
-without the compiled extension (the fallback path is the tested default).
+The numba two-pointer is checked against an INDEPENDENT brute-force O(n*m) oracle
+(different algorithm, so it can catch a two-pointer bug that a copy of the same loop
+cannot) and against its own pure-Python source (`py_func`). The optional C++ benchmark
+port is importorskip'd so CI is green without it.
 """
 
 from __future__ import annotations
@@ -14,11 +16,24 @@ import pandas as pd
 import pytest
 
 from fxpd.econo import hy
-from fxpd.econo import _hy_numpy as HNP
-from fxpd.econo import _hy_numba as HNB
 
 NS = 1_000_000_000
 FIX = Path(__file__).parent / "fixtures"
+
+
+def _hy_bruteforce(tx, x, ty, y):
+    """Oracle: sum r_i * q_j over ALL pairs of overlapping half-open intervals."""
+    rx, ry = np.diff(x), np.diff(y)
+    ax, bx, ay, by = tx[:-1], tx[1:], ty[:-1], ty[1:]
+    total, step = 0.0, 1000
+    for s in range(0, rx.size, step):                 # chunk rows to bound memory
+        ov = (bx[s:s + step, None] > ay[None, :]) & (by[None, :] > ax[s:s + step, None])
+        total += float(rx[s:s + step] @ (ov.astype(float) @ ry))
+    return total
+
+
+def _close(a, b, rtol=1e-10):
+    return abs(a - b) <= rtol * max(abs(a), abs(b)) + 1e-18
 
 
 def _poisson_rw(T, lam, seed, sigma=1e-3):
@@ -101,31 +116,31 @@ def test_hy_equals_realized_cov_on_sync_grid():
     assert abs(hy.hy_cov(t, x, t, y) - float(np.sum(np.diff(x) * np.diff(y)))) < 1e-14
 
 
-# --- Parity: numba vs numpy (synthetic + real fixture) ----------------------------
+# --- Oracle parity: two-pointer == brute force over all interval pairs -------------
 @pytest.mark.parametrize("source", ["synthetic", "fixture"])
-def test_parity_numba_vs_numpy(source):
+def test_two_pointer_matches_bruteforce_oracle(source):
     if source == "synthetic":
         tx, x, _ = _poisson_rw(500.0, 5, 7)
         ty, y, _ = _poisson_rw(500.0, 5, 8)
     else:
         tx, x = _fixture_arrays("EURUSD")
         ty, y = _fixture_arrays("EURJPY")
-    thetas = hy.theta_grid_ns()
-    assert abs(HNP.hy_cov(tx, x, ty, y) - HNB.hy_cov(tx, x, ty, y)) < 1e-12
-    r_np = HNP.hy_leadlag(tx, x, ty, y, thetas)
-    r_nb = HNB.hy_leadlag(tx, x, ty, y, thetas)
-    assert np.max(np.abs(r_np - r_nb)) < 1e-12
+    for theta_ms in (-200, -5, 0, 5, 200):            # shifted Y exercises the lead-lag path
+        shift = np.int64(theta_ms * 1_000_000)
+        assert _close(hy.hy_cov(tx, x, ty + shift, y), _hy_bruteforce(tx, x, ty + shift, y))
+    # jitted == its own pure-Python source (the readable reference)
+    assert abs(hy.hy_cov(tx, x, ty, y) - hy.hy_cov.py_func(tx, x, ty, y)) < 1e-12
 
 
-# --- Parity: C++ vs numpy (skipped if fxpd_fast not built -> CI green uncompiled) --
-def test_parity_cpp_vs_numpy_real_fixture():
+# --- Parity: optional C++ benchmark port (skipped if fxpd_fast not built) ----------
+def test_parity_cpp_vs_numba_real_fixture():
     fast = pytest.importorskip("fxpd_fast")
     tx, x = _fixture_arrays("EURUSD")
     ty, y = _fixture_arrays("EURJPY")
     thetas = hy.theta_grid_ns()
-    assert abs(fast.hy_cov(tx, x, ty, y) - HNP.hy_cov(tx, x, ty, y)) < 1e-12
+    assert abs(fast.hy_cov(tx, x, ty, y) - hy.hy_cov(tx, x, ty, y)) < 1e-12
     r_cpp = fast.hy_leadlag(tx, x, ty, y, thetas)
-    assert np.max(np.abs(r_cpp - HNP.hy_leadlag(tx, x, ty, y, thetas))) < 1e-12
+    assert np.max(np.abs(r_cpp - hy.hy_leadlag(tx, x, ty, y, thetas))) < 1e-12
 
 
 def test_driver_leadlag_windows(tmp_path, monkeypatch):
@@ -150,10 +165,17 @@ def test_driver_leadlag_windows(tmp_path, monkeypatch):
     assert out.attrs["rho"].shape == (1, len(hy.theta_grid_ns()))
 
 
-def test_backend_and_smoke():
-    assert hy.BACKEND in {"cpp", "numba", "numpy"}
+def test_leadlag_smoke():
     tx, x, _ = _poisson_rw(200.0, 5, 9)
     ty, y, _ = _poisson_rw(200.0, 5, 10)
     thetas = hy.theta_grid_ns()
     rho = hy.hy_leadlag(tx, x, ty, y, thetas)
     assert rho.shape == thetas.shape and np.all(np.isfinite(rho))
+
+
+def test_flat_series_gives_nan_not_an_exception():
+    # zero realized variance must yield non-finite rho (one NaN row), never abort the loop
+    t = np.arange(300, dtype=np.int64) * 100_000_000
+    y = np.cumsum(np.random.default_rng(0).normal(0, 1e-4, 300))
+    rho = hy.hy_leadlag(t, np.zeros(300), t, y, hy.theta_grid_ns())
+    assert rho.shape == hy.theta_grid_ns().shape and not np.isfinite(rho).any()

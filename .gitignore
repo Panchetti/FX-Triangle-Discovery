@@ -7,11 +7,11 @@ __pycache__/
 .idea/
 .Rhistory
 
-# Data (large; reproducible from the resumable puller) — per CLAUDE.md, all of data/
-data/
+# Data (large; reproducible from the resumable puller)
+/data/
 
 # Outputs (figures live in the committed notebooks; PNGs are regenerable)
-outputs/
+/outputs/
 
 # OS
 .DS_Store

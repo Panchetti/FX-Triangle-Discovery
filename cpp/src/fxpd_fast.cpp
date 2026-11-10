@@ -1,9 +1,9 @@
 // fxpd_fast — Hayashi-Yoshida covariation + lead-lag hot loop (Week 4).
 //
-// One pybind11 extension for the O(n+m) two-pointer over millions of tick pairs.
-// Identical algorithm to fxpd.econo._hy_numpy / _hy_numba; parity to the numpy
-// reference is asserted to < 1e-12 in tests/test_hy.py. The lead-lag shift is
-// applied as an int64 offset inside the interval comparison — no array copies.
+// Optional benchmark port of the O(n+m) two-pointer in fxpd.econo.hy (numba), which the
+// library actually uses -- numba measured faster than this module. Parity to the numba
+// version is asserted to < 1e-12 in tests/test_hy.py. The lead-lag shift is applied as
+// an int64 offset inside the interval comparison — no array copies.
 
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>

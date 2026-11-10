@@ -2,26 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import numpy as np
 import pandas as pd
 from hmmlearn.hmm import GaussianHMM
 
 HI, LO = 0.7, 0.3
 
-@dataclass
-class Standardiser:
-    mean: float
-    sd: float
-
-    def apply(self, x: np.ndarray) -> np.ndarray:
-        return (np.asarray(x, float) - self.mean) / self.sd
-
-def fit_standardiser(x_train: np.ndarray) -> Standardiser:
-    x = np.asarray(x_train, float)
-    return Standardiser(float(x.mean()), float(x.std()))
-
+# NB: a fixed TRAIN-split standardiser was tried first and classified 100% of EVAL as
+# "stressed" (non-stationary level across the chronological split) -- hence the causal
+# trailing standardisation below.
 def rolling_standardise(
     x: np.ndarray, window: int = 400, min_periods: int = 100, clip: float = 5.0
 ) -> np.ndarray:

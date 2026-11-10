@@ -6,43 +6,62 @@ import datetime as dt
 
 import numpy as np
 import pandas as pd
+from numba import njit
 
 from ..config import Triangle
 
-# backend: cpp -> numba -> numpy
-try:
-    from fxpd_fast import hy_cov, hy_leadlag  # type: ignore
-
-    BACKEND = "cpp"
-except Exception:  # noqa: BLE001
-    try:
-        from ._hy_numba import hy_cov as _cov, hy_leadlag as _ll
-
-        # warm the JIT so a numba failure falls back cleanly
-        _probe = np.array([0, 1], dtype=np.int64)
-        _cov(_probe, np.array([0.0, 1.0]), _probe, np.array([0.0, 1.0]))
-        _ll(_probe, np.array([0.0, 1.0]), _probe, np.array([0.0, 1.0]),
-            np.array([0], dtype=np.int64))
-        hy_cov, hy_leadlag = _cov, _ll
-        BACKEND = "numba"
-    except Exception:  # noqa: BLE001
-        from ._hy_numpy import hy_cov, hy_leadlag
-
-        BACKEND = "numpy"
+# Single implementation (numba). An optional pybind11 port lives in cpp/ purely as a
+# benchmark: it was measured SLOWER than this (19 ms vs 12 ms on one liquid day), so the
+# library never imports it. The pure-Python reference is `hy_cov.py_func`.
 
 NS_PER_MS = 1_000_000
 THETAS_MS = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000]
+
+
+# error_model="numpy": a zero realized variance gives nan/inf (as the C++ port does), not a
+# ZeroDivisionError that would abort a whole leadlag_windows loop on one flat series.
+@njit(cache=True, error_model="numpy")
+def hy_cov(tx, x, ty, y):
+    """Hayashi-Yoshida covariation over half-open interval overlaps, O(n+m) two-pointer.
+
+    Returns and interval endpoints are precomputed as contiguous arrays: indexing i+1 inside
+    the loop instead measured 1.8x slower under numba (22 ms vs 12 ms on one liquid day).
+    """
+    rx = x[1:] - x[:-1]
+    ry = y[1:] - y[:-1]
+    ax, bx = tx[:-1], tx[1:]
+    ay, by = ty[:-1], ty[1:]
+    i = 0
+    j = 0
+    n = rx.shape[0]
+    m = ry.shape[0]
+    cov = 0.0
+    while i < n and j < m:
+        if bx[i] > ay[j] and by[j] > ax[i]:               # (ax_i, bx_i] and (ay_j, by_j] overlap
+            cov += rx[i] * ry[j]
+        if bx[i] <= by[j]:                                 # advance the interval that ends first
+            i += 1
+        else:
+            j += 1
+    return cov
+
+
+@njit(cache=True, error_model="numpy")
+def hy_leadlag(tx, x, ty, y, thetas_ns):
+    """rho(theta) = HY-corr(X, Y shifted by +theta) for each theta (nanoseconds)."""
+    rvx = np.sum((x[1:] - x[:-1]) ** 2)
+    rvy = np.sum((y[1:] - y[:-1]) ** 2)
+    denom = np.sqrt(rvx * rvy)
+    out = np.empty(thetas_ns.shape[0], dtype=np.float64)
+    for k in range(thetas_ns.shape[0]):
+        out[k] = hy_cov(tx, x, ty + thetas_ns[k], y) / denom
+    return out
+
 
 def theta_grid_ns() -> np.ndarray:
     """Symmetric lead-lag grid -/+ THETAS_MS plus 0, in int64 nanoseconds."""
     pos = np.array(THETAS_MS, dtype=np.int64)
     return np.concatenate([-pos[::-1], [0], pos]).astype(np.int64) * NS_PER_MS
-
-def hy_corr(tx: np.ndarray, x: np.ndarray, ty: np.ndarray, y: np.ndarray) -> float:
-    """HY correlation cov / sqrt(RV_X * RV_Y). May exceed 1 in finite samples."""
-    rvx = float(np.sum(np.diff(x) ** 2))
-    rvy = float(np.sum(np.diff(y) ** 2))
-    return hy_cov(tx, x, ty, y) / np.sqrt(rvx * rvy)
 
 def leadlag_summary(thetas_ns: np.ndarray, rho: np.ndarray) -> dict:
     """theta* = argmax|rho|, plus the peak rho and the asymmetry statistic S."""

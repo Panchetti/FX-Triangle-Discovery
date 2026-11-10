@@ -136,3 +136,68 @@ def test_fit_system_alpha_matches_estimate_window():
     a_sys = vecm.fit_system(x, k=2, names=NAMES).alpha
     a_ew = vecm.estimate_window(x, 2, vecm.BIVARIATE, NAMES, bar_seconds=1.0).alpha
     assert np.allclose(a_sys, a_ew, atol=1e-10)
+
+
+# --------------------------------------------------------------------------- #
+# Driver: dead-day guard + refresh clock through the same entry point.
+# --------------------------------------------------------------------------- #
+def _write_triangle_day(store, date, n_seconds, seed):
+    """EURUSD/USDJPY random walks; EURJPY = product x stationary AR(1) basis noise."""
+    rng = np.random.default_rng(seed)
+    ts = pd.date_range(f"{date} 08:00", periods=n_seconds, freq="1s", tz="UTC")
+    lu = np.log(1.10) + np.cumsum(rng.normal(0, 1e-5, n_seconds))
+    lj = np.log(150.0) + np.cumsum(rng.normal(0, 1e-5, n_seconds))
+    u = np.zeros(n_seconds)
+    for t in range(1, n_seconds):
+        u[t] = 0.8 * u[t - 1] + rng.normal(0, 2e-6)
+    for sym, logmid in [("EURUSD", lu), ("USDJPY", lj), ("EURJPY", lu + lj + u)]:
+        mid = np.exp(logmid)
+        store.write_day(sym, date, pd.DataFrame({
+            "ts": ts, "bid": mid * (1 - 1e-5), "ask": mid * (1 + 1e-5),
+            "bid_volume": 1.0, "ask_volume": 1.0}))
+
+
+def test_min_leg_updates_counts_real_updates_not_bars():
+    tri = __import__("fxpd.config", fromlist=["TRIANGLES"]).TRIANGLES["majors"]
+    p = pd.DataFrame({"age_EURJPY": [0.0, 0.5, 3.0, 9.0],   # 2 fresh bars
+                      "age_EURUSD": [0.0, 0.0, 0.0, 0.2],   # 4
+                      "age_USDJPY": [5.0, 6.0, 7.0, 0.1]})  # 1  <- binding leg
+    assert vecm.min_leg_updates(p, tri, bar_seconds=1.0) == 1
+    assert vecm.min_leg_updates(p.iloc[:0], tri, bar_seconds=1.0) == 0
+
+
+def test_dead_day_skipped_and_refresh_clock(tmp_path, monkeypatch):
+    import datetime as dt
+
+    import fxpd.data.processed as processed
+    import fxpd.data.store as store
+    from fxpd.config import TRIANGLES
+
+    monkeypatch.setattr(store, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr(processed, "PROCESSED_DIR", tmp_path / "processed")
+    tri = TRIANGLES["majors"]
+    live, dead = dt.date(2026, 6, 15), dt.date(2026, 6, 16)
+    _write_triangle_day(store, live, 4 * 3600, seed=0)
+    _write_triangle_day(store, dead, 50, seed=1)      # 50 ticks, then LOCF for hours
+
+    grid = disc.fit_discovery_windows(tri, [live, dead], "1s", k=2, min_bars=500)
+    assert list(grid["date"]) == [live]                # dead day rejected by min_updates
+    assert grid.attrs["skipped"] == 1
+    # without the guard the LOCF-filled dead day would be estimated (the old behaviour)
+    loose = disc.fit_discovery_windows(tri, [live, dead], "1s", k=2, min_bars=500,
+                                       min_updates=0)
+    assert dead in set(loose["date"])
+
+    ref = disc.fit_discovery_windows(tri, [live, dead], "1s", k=2, min_bars=500,
+                                     clock="refresh")
+    assert list(ref["date"]) == [live] and np.isfinite(ref["gg_cross"].iloc[0])
+    with pytest.raises(ValueError):
+        disc.fit_discovery_windows(tri, [live], "1s", k=2, clock="refresh",
+                                   stale_filter=True)
+
+
+def test_aggregate_all_invalid_keeps_every_attr_key():
+    res = pd.DataFrame({"gg_cross": [2.0], "valid": [False]})
+    a = disc.aggregate_discovery(res)
+    assert {"half_life_median", "half_life_dyn_median", "n_valid"} <= set(a.attrs)
+    assert np.isnan(a.attrs["half_life_dyn_median"])

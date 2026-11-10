@@ -84,3 +84,17 @@ def test_news_mask_requires_tzaware():
 
     with pytest.raises(ValueError):
         news_mask(pd.date_range("2026-06-15", periods=3, freq="1h"))
+
+
+def test_fx_open_is_new_york_week_not_utc_weekdays():
+    from fxpd.calendar.sessions import fx_open
+
+    idx = pd.DatetimeIndex([pd.Timestamp(s, tz="UTC") for s in [
+        "2026-07-10 21:30",   # Fri 17:30 EDT -> closed (UTC weekday would keep it)
+        "2026-01-09 21:30",   # Fri 16:30 EST -> open
+        "2026-01-11 22:30",   # Sun 17:30 EST -> open (UTC weekday would drop it)
+        "2026-01-11 21:30",   # Sun 16:30 EST -> closed
+        "2026-01-10 12:00",   # Sat -> closed
+        "2026-01-07 03:00",   # Wed -> open
+    ]])
+    assert fx_open(idx).tolist() == [False, True, True, False, False, True]

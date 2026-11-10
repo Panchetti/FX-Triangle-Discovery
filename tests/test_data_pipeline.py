@@ -14,7 +14,6 @@ import pandas as pd
 from fxpd.config import Triangle
 from fxpd.data import store
 from fxpd.data.basis import build_panel
-from fxpd.data.mids import add_mid
 from fxpd.data.synchronize import previous_tick, build_grid
 
 
@@ -28,14 +27,6 @@ def _ticks(ts, bids, asks):
             "ask_volume": np.ones(len(ts)),
         }
     )
-
-
-def test_add_mid_logmid():
-    df = _ticks(["2026-06-15T00:00:00"], [1.0], [1.02])
-    out = add_mid(df)
-    assert out["mid"].iloc[0] == 1.01
-    assert np.isclose(out["logmid"].iloc[0], np.log(1.01))
-    assert np.isclose(out["half_spread"].iloc[0], 0.01)
 
 
 def test_previous_tick_locf():

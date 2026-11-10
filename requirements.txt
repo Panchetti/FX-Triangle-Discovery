@@ -13,8 +13,8 @@ dukascopy-python==4.0.1
 arch>=6.3
 hmmlearn>=0.3
 
-# Week 4: Hayashi-Yoshida hot loop. numba is the middle tier + fallback when the
-# optional C++ extension (cpp/, pybind11) is not built. numba 0.60 supports numpy 1.26.
+# Week 4: Hayashi-Yoshida hot loop. numba is the only HY engine (an optional C++ port in
+# cpp/ is kept as a benchmark only). numba 0.60 supports numpy 1.26.
 numba>=0.59
 
 # Tooling

@@ -9,7 +9,6 @@ import pytest
 
 from fxpd.regimes.hmm import (
     fit_hmm,
-    fit_standardiser,
     forward_filter,
     hmm_params,
     label_states,
@@ -66,13 +65,6 @@ def test_stressed_index_and_thresholds():
     assert stressed_index(np.array([1.9, 0.2])) == 0      # never trust EM ordering
     lab = label_states(np.array([0.95, 0.5, 0.05]))
     assert list(lab) == ["stressed", "uncertain", "calm"]
-
-
-def test_standardiser_is_train_only():
-    train, evl = np.array([1.0, 2.0, 3.0]), np.array([10.0, 20.0])
-    std = fit_standardiser(train)
-    # EVAL is transformed with TRAIN constants (no re-fitting on EVAL)
-    assert std.apply(evl)[0] == pytest.approx((10.0 - train.mean()) / train.std())
 
 
 def test_no_smoothed_calls_in_regimes_source():

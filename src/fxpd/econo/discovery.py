@@ -130,20 +130,44 @@ def fit_discovery_windows(
     stale_filter: bool = False,
     bar_mask: pd.Series | None = None,
     mask_tolerance: str = "30min",
+    clock: str = "grid",
+    min_updates: int = vecm.MIN_UPDATES,
 ) -> pd.DataFrame:
-    """Per (day x window) bivariate discovery; one row per estimated window."""
-    from ..data.processed import get_panel
+    """Per (day x window) bivariate discovery; one row per estimated window.
 
-    bar_seconds = pd.Timedelta(freq).total_seconds()
+    clock="grid":    previous-tick (LOCF) panel at ``freq``, from the per-day cache.
+    clock="refresh": multivariate refresh-time sampling (BNHLS 2011) -- the staleness
+                     control. ``freq`` is ignored; half-lives use the window's mean refresh
+                     interval as the bar length. Not staleness-free (residual within-refresh
+                     age) and it changes the estimand (lags count refresh cycles).
+    min_updates:     grid clock only -- every leg must post this many genuine quote updates
+                     in the window. LOCF fills every bar, so ``min_bars`` alone cannot reject
+                     a no-trading day (e.g. 25 Dec). Refresh rows are genuine updates already.
+    """
+    from ..data.processed import get_panel, get_refresh_panel
+    from ..data.refresh import mean_refresh_seconds
+
+    if clock not in ("grid", "refresh"):
+        raise ValueError(f"clock must be 'grid' or 'refresh', got {clock!r}")
+    if clock == "refresh" and (stale_filter or bar_mask is not None):
+        raise ValueError("stale_filter and bar_mask are grid-clock controls")
     names = vecm.frame_names(triangle, vecm.BIVARIATE)
     rows, skipped = [], 0
     for d in dates:
         try:
-            panel = get_panel(triangle, d, freq, with_age=True)
+            panel = (get_panel(triangle, d, freq, with_age=True) if clock == "grid"
+                     else get_refresh_panel(triangle, d, liquid=liquid))
         except FileNotFoundError:
             skipped += 1
             continue
         win = _window_slice(panel, liquid, session)
+        if clock == "grid":
+            bar_seconds = pd.Timedelta(freq).total_seconds()
+            if vecm.min_leg_updates(win, triangle, bar_seconds) < min_updates:
+                skipped += 1
+                continue
+        else:
+            bar_seconds = mean_refresh_seconds(win.index)
         x = vecm.make_frame(win, triangle, vecm.BIVARIATE)
         keep = None
         if stale_filter:
@@ -170,39 +194,6 @@ def fit_discovery_windows(
     out.attrs["skipped"] = skipped
     return out
 
-def fit_discovery_windows_refresh(
-    triangle: Triangle,
-    dates: list[dt.date],
-    k: int,
-    liquid: tuple[int, int] = (7, 17),
-    min_bars: int = 1000,
-    session: str | None = None,
-) -> pd.DataFrame:
-    """Per (day x window) bivariate discovery sampled in refresh time."""
-    from ..data.refresh import mean_refresh_seconds, refresh_panel
-
-    names = vecm.frame_names(triangle, vecm.BIVARIATE)
-    rows, skipped = [], 0
-    for d in dates:
-        try:
-            panel = refresh_panel(triangle, d, liquid=liquid)
-        except FileNotFoundError:
-            skipped += 1
-            continue
-        win = _window_slice(panel, liquid, session)
-        x = vecm.make_frame(win, triangle, vecm.BIVARIATE)
-        if len(x) - (k + 1) < min_bars:
-            skipped += 1
-            continue
-        bar_seconds = mean_refresh_seconds(win.index)
-        system = vecm.fit_system(x, k, names)
-        r = discovery_window(system, bar_seconds)
-        r.date = d
-        rows.append(vars(r))
-    out = pd.DataFrame(rows)
-    out.attrs["skipped"] = skipped
-    return out
-
 def aggregate_discovery(res: pd.DataFrame) -> pd.DataFrame:
     """Across-window summary over valid windows: GG median [IQR], IS [lo, hi]."""
     n = len(res)
@@ -220,6 +211,7 @@ def aggregate_discovery(res: pd.DataFrame) -> pd.DataFrame:
         out = pd.DataFrame(np.nan, index=pd.Index(["cross", "synth"], name="series"), columns=cols)
         out.attrs.update(n_windows=n, n_valid=0, exclusion_rate=(1.0 if n else np.nan),
                          resid_corr_median=np.nan, half_life_median=np.nan,
+                         half_life_dyn_median=np.nan,
                          n_is_valid={"cross": 0, "synth": 0}, **incl)
         return out
     rows, n_is_valid = {}, {}
@@ -248,50 +240,17 @@ def aggregate_discovery(res: pd.DataFrame) -> pd.DataFrame:
     )
     return out
 
-def select_k_for_freq(
-    triangle: Triangle,
-    dates: list[dt.date],
-    freq: str,
-    liquid: tuple[int, int] = (7, 17),
-    n_windows: int = 6,
-    k_max: int = 20,
-) -> int:
-    """Modal BIC-argmin k over the first few liquid-hours windows at ``freq``."""
-    from ..data.processed import get_panel
-
-    ks = []
-    for d in dates:
-        if len(ks) >= n_windows:
-            break
-        try:
-            panel = get_panel(triangle, d, freq, with_age=True)
-        except FileNotFoundError:
-            continue
-        x = vecm.make_frame(_liquid_slice(panel, liquid), triangle, vecm.BIVARIATE)
-        if len(x) < 5000:
-            continue
-        bic = vecm.select_k_bic(x, k_max=k_max)
-        ks.append(int(bic.loc[bic["bic"].idxmin(), "k"]))
-    if not ks:
-        raise FileNotFoundError(f"No usable windows to select k at {freq}")
-    return int(pd.Series(ks).mode().iloc[0])
-
 def frequency_curve(
     triangle: Triangle,
     dates: list[dt.date],
     freqs: list[str],
-    k: int | dict | None = None,
+    k: int | dict[str, int],
     liquid: tuple[int, int] = (7, 17),
 ) -> pd.DataFrame:
-    """Median GG + IS bounds per frequency."""
+    """Median GG + IS bounds per frequency. ``k``: one lag order, or one per frequency."""
     rows = []
     for freq in freqs:
-        if k is None:
-            k_used = select_k_for_freq(triangle, dates, freq, liquid=liquid)
-        elif isinstance(k, dict):
-            k_used = k[freq]
-        else:
-            k_used = k
+        k_used = k[freq] if isinstance(k, dict) else k
         res = fit_discovery_windows(triangle, dates, freq, k_used, liquid=liquid)
         agg = aggregate_discovery(res)
         for series in ("cross", "synth"):

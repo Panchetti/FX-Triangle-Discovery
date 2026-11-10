@@ -229,6 +229,18 @@ def _flatten(r: VECMWindowResult) -> dict:
         row[f"fresh_{name}"] = r.fresh_share[j]
     return row
 
+MIN_UPDATES = 200   # default activity floor: genuine quote updates per leg per window
+
+def min_leg_updates(panel: pd.DataFrame, triangle: Triangle, bar_seconds: float) -> int:
+    """Fewest bars in which a leg genuinely updated (quote age <= one bar), over the legs.
+
+    LOCF fills every grid bar, so a bar count says nothing about activity: a no-trading
+    holiday still yields 36,000 one-second bars. This counts real quote updates instead.
+    """
+    if panel.empty:
+        return 0
+    return int(min((panel[f"age_{s}"] <= bar_seconds).sum() for s in triangle.legs))
+
 def window_fresh_flags(
     panel: pd.DataFrame, triangle: Triangle, frame: str, bar_seconds: float
 ) -> pd.DataFrame:
@@ -248,22 +260,27 @@ def fit_windows(
     liquid: tuple[int, int] = (7, 17),
     stale_filter: bool = False,
     min_bars: int = 1000,
+    min_updates: int = MIN_UPDATES,
 ) -> pd.DataFrame:
-    """Estimate per (day x liquid-hours) window; one flattened row per survivor."""
-    from ..data.basis import build_panel
+    """Estimate per (day x liquid-hours) window; one flattened row per survivor.
+
+    ``min_updates``: every leg must post at least this many genuine quote updates in the
+    window (dead-day guard -- see ``min_leg_updates``).
+    """
+    from ..data.processed import get_panel
 
     bar_seconds = pd.Timedelta(freq).total_seconds()
     names = frame_names(triangle, frame)
     rows, skipped = [], 0
     for d in dates:
         try:
-            panel = build_panel(triangle, d, d, freq, clean=True, with_age=True)
+            panel = get_panel(triangle, d, freq, with_age=True)
         except FileNotFoundError:
             skipped += 1
             continue
         h = panel.index.hour
         win = panel[(h >= liquid[0]) & (h < liquid[1])]
-        if win.empty:
+        if win.empty or min_leg_updates(win, triangle, bar_seconds) < min_updates:
             skipped += 1
             continue
         x = make_frame(win, triangle, frame)

@@ -50,24 +50,3 @@ def news_free_transitions(dates: list[dt.date], pad: pd.Timedelta = PAD) -> pd.S
     if dates:
         pts[pd.Timestamp(min(dates), tz="UTC")] = True
     return pd.Series(pts).sort_index()
-
-def write_rule_calendar(path, start: dt.date, end: dt.date) -> pd.DataFrame:
-    """Rule-derived event list (first-Friday NFP, monthly CPI proxy, etc.)."""
-    rows = []
-    for ts in pd.date_range(start, end, freq="D"):
-        d = ts.date()
-        if ts.weekday() == 4 and ts.day <= 7:                    # first Friday
-            rows.append((d, "US_NFP", "US", "America/New_York", "08:30"))
-        if ts.weekday() == 2 and 8 <= ts.day <= 14:
-            rows.append((d, "US_CPI_proxy", "US", "America/New_York", "08:30"))
-    df = pd.DataFrame(rows, columns=["date", "event", "region", "tz", "local_time"])
-    header = (
-        "# Rule-derived calendar (unverified). Dates from scheduling rules,\n"
-        "# NOT confirmed against a source. Primary news test is time-of-day band\n"
-        "# exclusion (fxpd.calendar.news.news_mask), which needs no date list.\n"
-        "# Replace with a sourced central-bank calendar before publication.\n"
-    )
-    with open(path, "w") as fh:
-        fh.write(header)
-        df.to_csv(fh, index=False)
-    return df

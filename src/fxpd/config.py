@@ -32,11 +32,6 @@ TRIANGLES: dict[str, Triangle] = {
     "gbp": Triangle("gbp", cross="EURUSD", leg1="EURGBP", leg2="GBPUSD"),
 }
 
-INSTRUMENTS: list[str] = sorted({leg for t in TRIANGLES.values() for leg in t.legs})
-
-SANITY_FREQ = "1s"
-FREQ_GRID = ["100ms", "250ms", "1s", "5s"]
-
 def ensure_dirs() -> None:
     """Create the data/output directory tree if missing."""
     for d in (RAW_DIR, PROCESSED_DIR, QC_DIR, OUTPUTS_DIR):

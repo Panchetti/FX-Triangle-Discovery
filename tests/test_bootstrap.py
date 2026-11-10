@@ -100,3 +100,16 @@ def test_block_covers_iid_undercovers():
     assert cov_block > 0.85, f"block coverage too low: {cov_block}"
     assert cov_iid < 0.78, f"iid should under-cover badly: {cov_iid}"
     assert cov_block - cov_iid > 0.15, f"contrast too small: block={cov_block} iid={cov_iid}"
+
+
+def test_tost_p_known_values():
+    from fxpd.inference.bootstrap import tost_p
+
+    # diff tightly inside (-0.05, 0.05) -> both one-sided nulls rejected -> equivalent
+    p_lo, p_hi, p = tost_p(np.array([-0.01, 0.0, 0.01, 0.02]), delta=0.05)
+    assert (p_lo, p_hi, p) == (0.0, 0.0, 0.0)
+    # half the mass beyond +delta -> cannot claim equivalence
+    p_lo, p_hi, p = tost_p(np.array([0.0, 0.01, 0.06, 0.07]), delta=0.05)
+    assert (p_lo, p_hi, p) == (0.0, 0.5, 0.5)
+    # NaN-only distribution never becomes a result
+    assert all(np.isnan(v) for v in tost_p(np.array([np.nan, np.nan]), delta=0.05))

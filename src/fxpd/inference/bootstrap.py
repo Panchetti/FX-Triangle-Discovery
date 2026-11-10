@@ -2,21 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
 import pandas as pd
-from arch.bootstrap import IIDBootstrap, MovingBlockBootstrap
-
-@dataclass
-class HypResult:
-    name: str
-    stat: float
-    ci_lo: float
-    ci_hi: float
-    p_raw: float
-    p_holm: float | None = None
+from arch.bootstrap import MovingBlockBootstrap
 
 def metric_by_day(res: dict[str, pd.DataFrame], metric: str = "gg_cross") -> pd.DataFrame:
     """Wide frame index=date, columns=sessions, values=`metric` over VALID windows."""
@@ -46,19 +36,6 @@ def block_bootstrap(
     lo, hi = np.percentile(dist, [2.5, 97.5])
     return point, (float(lo), float(hi)), dist
 
-def iid_bootstrap(
-    wide: pd.DataFrame, stat_fn, B: int = 2000, seed: int = 0
-) -> tuple[float, tuple[float, float], np.ndarray]:
-    """i.i.d. bootstrap (the WRONG one for dependent days) -- for the coverage contrast."""
-    def _f(df):
-        return np.array([stat_fn(df)])
-
-    bs = IIDBootstrap(wide, seed=seed)
-    dist = bs.apply(_f, B).ravel()
-    point = float(stat_fn(wide))
-    lo, hi = np.percentile(dist, [2.5, 97.5])
-    return point, (float(lo), float(hi)), dist
-
 def p_from_dist(dist: np.ndarray, alternative: str = "two-sided") -> float:
     """CI-inversion bootstrap p-value. alternative in {greater, less, two-sided}."""
     dist = np.asarray(dist, float)
@@ -70,6 +47,21 @@ def p_from_dist(dist: np.ndarray, alternative: str = "two-sided") -> float:
     if alternative == "less":
         return float((dist >= 0).mean())
     return float(2 * min((dist <= 0).mean(), (dist >= 0).mean()))
+
+def tost_p(dist: np.ndarray, delta: float) -> tuple[float, float, float]:
+    """Bootstrap TOST for equivalence |diff| < delta, by CI inversion (same logic as p_from_dist).
+
+    Returns (p_lower, p_upper, p_tost): p_lower tests H0 diff <= -delta (share of the
+    bootstrap distribution at or below -delta), p_upper tests H0 diff >= +delta, and
+    p_tost = max of the two. Equivalence is claimed only when p_tost is small.
+    """
+    dist = np.asarray(dist, float)
+    dist = dist[np.isfinite(dist)]
+    if dist.size == 0:
+        return float("nan"), float("nan"), float("nan")
+    p_lo = float((dist <= -delta).mean())
+    p_hi = float((dist >= delta).mean())
+    return p_lo, p_hi, max(p_lo, p_hi)
 
 def holm(pvals: list[float]) -> list[float]:
     """Holm-Bonferroni step-down adjusted p-values (valid under any dependence)."""
@@ -92,10 +84,6 @@ def holm(pvals: list[float]) -> list[float]:
 def diff_medians(session_a: str, session_b: str) -> Callable[[pd.DataFrame], float]:
     """stat_fn: nanmedian(A) - nanmedian(B) (the pinned between-session difference)."""
     return lambda w: float(np.nanmedian(w[session_a]) - np.nanmedian(w[session_b]))
-
-def diff_median_vs_pool(session_a: str, pool: list[str]) -> Callable[[pd.DataFrame], float]:
-    """stat_fn: nanmedian(A) - nanmedian(pooled columns)."""
-    return lambda w: float(np.nanmedian(w[session_a]) - np.nanmedian(w[pool].to_numpy()))
 
 def diff_vs_equal_edge(target: str, edges: list[str]) -> Callable[[pd.DataFrame], float]:
     """stat_fn: median over complete-case days of [target - mean(edges)]."""

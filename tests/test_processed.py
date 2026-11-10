@@ -46,3 +46,39 @@ def test_get_panel_cache_roundtrip(tmp_path, monkeypatch):
 
     processed.get_panel(tri, date, "1min", rebuild=True)  # rebuild overwrites
     assert path.stat().st_mtime_ns != mtime
+
+
+def test_legacy_cache_without_ages_is_rebuilt_and_with_age_false_drops(tmp_path, monkeypatch):
+    """A file cached without age_* (old with_age=False callers) must not starve the
+    activity floor: with_age=True rebuilds it; with_age=False only drops the columns."""
+    monkeypatch.setattr(store, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr(processed, "PROCESSED_DIR", tmp_path / "processed")
+    tri = TRIANGLES["majors"]
+    date = dt.date(2026, 6, 15)
+    _seed_day(tmp_path / "raw", date)
+
+    full = processed.get_panel(tri, date, "1min")
+    path = processed.panel_path(tri.name, "1min", date)
+    full.drop(columns=[c for c in full.columns if c.startswith("age_")]).to_parquet(path)
+
+    lean = processed.get_panel(tri, date, "1min", with_age=False)
+    assert not any(c.startswith("age_") for c in lean.columns)
+    again = processed.get_panel(tri, date, "1min")                 # legacy file -> rebuilt
+    assert "age_EURJPY" in again.columns
+    assert "age_EURJPY" in pd.read_parquet(path).columns
+
+
+def test_get_refresh_panel_cache_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr(processed, "PROCESSED_DIR", tmp_path / "processed")
+    tri = TRIANGLES["majors"]
+    date = dt.date(2026, 6, 15)
+    _seed_day(tmp_path / "raw", date)
+
+    p1 = processed.get_refresh_panel(tri, date, liquid=(7, 17))
+    path = processed.panel_path(tri.name, "refresh07-17", date)
+    mtime = path.stat().st_mtime_ns
+    p2 = processed.get_refresh_panel(tri, date, liquid=(7, 17))     # hit -> no rebuild
+    assert path.stat().st_mtime_ns == mtime
+    pd.testing.assert_frame_equal(p1, p2, check_freq=False)
+    assert {"z", "age_EURJPY"} <= set(p1.columns)

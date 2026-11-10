@@ -29,6 +29,19 @@ def _bound_ns(dates: pd.Index, uniq, tz: str, hm: tuple[int, int]) -> np.ndarray
     m = {d: _utc_ns(d, tz, hm) for d in uniq}
     return dates.map(m).to_numpy(dtype="int64")
 
+def fx_open(index: pd.DatetimeIndex) -> np.ndarray:
+    """True while the FX week is open: Sun 17:00 -> Fri 17:00 America/New_York (DST-aware).
+
+    UTC weekdays get both ends wrong (they keep frozen Friday-evening LOCF bars and drop the
+    live Sunday-evening open), so trading-time masks over multi-day panels use this.
+    """
+    if index.tz is None:
+        raise ValueError("fx_open requires a tz-aware (UTC) DatetimeIndex")
+    ny = index.tz_convert(_ROLLOVER_TZ)
+    wd, hr = ny.dayofweek, ny.hour
+    closed = ((wd == 4) & (hr >= 17)) | (wd == 5) | ((wd == 6) & (hr < 17))
+    return np.asarray(~closed)
+
 def label_sessions(index: pd.DatetimeIndex) -> pd.Categorical:
     """One session label per timestamp; vectorized, categories = SESSION_ORDER."""
     if index.tz is None:

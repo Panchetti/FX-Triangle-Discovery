@@ -1,9 +1,9 @@
-"""Build the optional fxpd_fast C++ extension (pybind11).
+"""Build the optional fxpd_fast C++ extension (pybind11) -- a BENCHMARK, not a dependency.
 
     ./.venv/bin/python -m pip install ./cpp
 
-Core fxpd never imports this directly; fxpd.econo.hy falls back to numba/numpy
-when it is not built.
+Core fxpd never imports this: fxpd.econo.hy runs numba, which beat this port on a real
+day (12 ms vs 19 ms). It is kept for the notebook-04 benchmark and a parity test.
 """
 
 from pybind11.setup_helpers import Pybind11Extension, build_ext
